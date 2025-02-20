@@ -1,0 +1,1 @@
+# MinimalOCR-Azure
