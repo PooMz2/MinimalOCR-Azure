@@ -1,0 +1,6 @@
+@MinimalOCR_HostAddress = http://localhost:5078
+
+GET {{MinimalOCR_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
