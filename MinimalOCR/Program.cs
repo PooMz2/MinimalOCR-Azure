@@ -4,23 +4,16 @@ using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1) ตั้งค่า Endpoint และ Key (ตัวอย่างฮาร์ดโค้ด)
-// ควรเก็บไว้ใน appsettings.json หรือ Environment Variables ในการใช้งานจริง
 string endpoint = "https://js-it.cognitiveservices.azure.com/";
 string key = "5YPc1l0j5hAVl36VfCsJ2VjxurNwMusUnjfLIciv9fiGEDvIGziGJQQJ99BBACqBBLyXJ3w3AAALACOGzHjo";
 
-// 2) สร้าง Credential และ Client
 var credential = new AzureKeyCredential(key);
 var client = new DocumentAnalysisClient(new Uri(endpoint), credential);
 
-// 3) สร้าง WebApplication
 var app = builder.Build();
 
-// 4) สร้าง Endpoint แบบ Minimal API
-//    POST /analyze รับ JSON { "InvoiceUrl": "<URL>" } แล้วส่งผลลัพธ์ InvoiceData กลับเป็น JSON
 app.MapPost("/analyze", async (AnalyzeRequest request) =>
 {
-    // ดาวน์โหลดไฟล์จาก URL
     byte[] imageData;
     try
     {
@@ -32,151 +25,181 @@ app.MapPost("/analyze", async (AnalyzeRequest request) =>
         return Results.BadRequest("Unable to download image data from the provided URL.");
     }
 
-    // วิเคราะห์เอกสารด้วย DocumentAnalysisClient
     using var stream = new MemoryStream(imageData);
-    var operation = await client.AnalyzeDocumentAsync(
-        WaitUntil.Completed,
-        "JS-IT-INVOICE", // Model ID ของคุณ (เปลี่ยนเป็น Model ID ที่ถูกต้อง)
-        stream);
+    var operation = await client.AnalyzeDocumentAsync(WaitUntil.Completed, "JSIT-INVOICE-MODEL", stream);
     var analyzeResult = operation.Value;
 
-    // ตรวจสอบว่าพบเอกสารหรือไม่
     if (analyzeResult.Documents.Count == 0)
-    {
         return Results.BadRequest("No document was detected in the provided image.");
-    }
 
-    // สมมติวิเคราะห์แค่เอกสารใบแรก
     var doc = analyzeResult.Documents[0];
 
-    // อ่านฟิลด์ตามชื่อที่กำหนดใน Custom Model
     string? customerAddress = ReadStringField(doc, "CustomerAddress");
     string? customerId = ReadStringField(doc, "CustomerId");
     string? customerName = ReadStringField(doc, "CustomerName");
     string? customerTaxId = ReadStringField(doc, "CustomerTaxId");
-
     string? dueDate = ReadDateField(doc, "DueDate");
     string? invoiceDate = ReadDateField(doc, "InvoiceDate");
     string? invoiceId = ReadStringField(doc, "InvoiceId");
-
     string? totalPrice = ReadCurrencyField(doc, "TotalPrice");
     string? subTotal = ReadCurrencyField(doc, "SubTotal");
     string? totalDiscount = ReadCurrencyField(doc, "TotalDiscount");
     string? totalTax = ReadCurrencyField(doc, "TotalTax");
-
     string? vendorAddress = ReadStringField(doc, "VendorAddress");
     string? vendorTaxId = ReadStringField(doc, "VendorTaxId");
     string? vendorName = ReadStringField(doc, "VendorName");
     string? paymentTerm = ReadStringField(doc, "PaymentTerm");
 
-    // อ่านรายการ Items (List)
     var items = new List<InvoiceItem>();
-    if (doc.Fields.TryGetValue("Items", out var itemsField) &&
-        itemsField.FieldType == DocumentFieldType.List)
+    if (doc.Fields.TryGetValue("Items", out var itemsField) && itemsField.FieldType == DocumentFieldType.List)
     {
-        foreach (var itemField in itemsField.Value.AsList())
+        foreach (var item in itemsField.Value.AsList())
         {
-            if (itemField.FieldType == DocumentFieldType.Dictionary)
+            if (item.FieldType == DocumentFieldType.Dictionary)
             {
-                var dict = itemField.Value.AsDictionary();
+                var dict = item.Value.AsDictionary();
 
+                string? productCode = null;
                 string? description = null;
+                string? quantity = null;
+                double? unit = null;
                 string? amount = null;
+                string? discount = null;
                 double? confidence = null;
 
-                if (dict.TryGetValue("Description", out var descField) &&
-                    descField.FieldType == DocumentFieldType.String)
-                {
+                if (dict.TryGetValue("ProductCode", out var codeField) && codeField.FieldType == DocumentFieldType.String)
+                    productCode = codeField.Value.AsString();
+
+                if (dict.TryGetValue("Description", out var descField) && descField.FieldType == DocumentFieldType.String)
                     description = descField.Value.AsString();
-                }
 
-                if (dict.TryGetValue("Amount", out var amtField) &&
-                    amtField.FieldType == DocumentFieldType.Currency)
+                if (dict.TryGetValue("Quantity", out var qtyField))
                 {
-                    var currencyVal = amtField.Value.AsCurrency();
-                    amount = $"{currencyVal.Symbol}{currencyVal.Amount}";
-                    confidence = amtField.Confidence;
+                    if (qtyField.FieldType == DocumentFieldType.Double)
+                        quantity = qtyField.Value.AsDouble().ToString();
+                    else if (qtyField.FieldType == DocumentFieldType.String)
+                        quantity = qtyField.Value.AsString();
                 }
 
-                items.Add(new InvoiceItem(description, amount, confidence));
+                if (dict.TryGetValue("Unit", out var unitField))
+                {
+                    if (unitField.FieldType == DocumentFieldType.Double)
+                        unit = unitField.Value.AsDouble();
+                    else if (unitField.FieldType == DocumentFieldType.String)
+                    {
+                        var strVal = unitField.Value.AsString();
+                        if (double.TryParse(strVal.Replace(",", "").Replace(" ", ""), out double parsed))
+                            unit = parsed;
+                    }
+                }
+
+                if (dict.TryGetValue("Discount", out var discountField))
+                {
+                    switch (discountField.FieldType)
+                    {
+                        case DocumentFieldType.Currency:
+                            var currencyVal = discountField.Value.AsCurrency();
+                            discount = $"{currencyVal.Symbol}{currencyVal.Amount}";
+                            confidence = discountField.Confidence;
+                            break;
+                        case DocumentFieldType.Double:
+                            discount = discountField.Value.AsDouble().ToString();
+                            confidence = discountField.Confidence;
+                            break;
+                        case DocumentFieldType.String:
+                            var strVal = discountField.Value.AsString();
+                            if (double.TryParse(strVal.Replace(",", "").Replace(" ", ""), out double parsedDiscount))
+                                discount = parsedDiscount.ToString();
+                            else
+                                discount = strVal;
+                            confidence = discountField.Confidence;
+                            break;
+                    }
+                }
+
+                if (dict.TryGetValue("Amount", out var amtField))
+                {
+                    switch (amtField.FieldType)
+                    {
+                        case DocumentFieldType.Currency:
+                            var currencyVal = amtField.Value.AsCurrency();
+                            amount = $"{currencyVal.Symbol}{currencyVal.Amount}";
+                            confidence = amtField.Confidence;
+                            break;
+                        case DocumentFieldType.Double:
+                            amount = amtField.Value.AsDouble().ToString();
+                            confidence = amtField.Confidence;
+                            break;
+                        case DocumentFieldType.String:
+                            amount = amtField.Value.AsString();
+                            confidence = amtField.Confidence;
+                            break;
+                    }
+                }
+
+                items.Add(new InvoiceItem(productCode, description, quantity, unit, amount, discount, confidence));
             }
         }
     }
 
-    // สร้างออบเจ็กต์ผลลัพธ์ InvoiceData
     var invoiceData = new InvoiceData(
-        CustomerAddress: customerAddress,
-        CustomerId: customerId,
-        CustomerName: customerName,
-        CustomerTaxId: customerTaxId,
-        DueDate: dueDate,
-        InvoiceDate: invoiceDate,
-        InvoiceId: invoiceId,
-        TotalPrice: totalPrice,
-        Items: items,
-        SubTotal: subTotal,
-        TotalDiscount: totalDiscount,
-        TotalTax: totalTax,
-        VendorAddress: vendorAddress,
-        VendorTaxId: vendorTaxId,
-        VendorName: vendorName,
-        PaymentTerm: paymentTerm
+        customerAddress,
+        customerId,
+        customerName,
+        customerTaxId,
+        dueDate,
+        invoiceDate,
+        invoiceId,
+        totalPrice,
+        items,
+        subTotal,
+        totalDiscount,
+        totalTax,
+        vendorAddress,
+        vendorTaxId,
+        vendorName,
+        paymentTerm
     );
 
-    // ส่งกลับผลลัพธ์เป็น JSON
     return Results.Ok(invoiceData);
 });
 
-// 5) รันแอป
 app.Run();
 
-
-// -----------------------------------------------------------------------------
-// ฟังก์ชันช่วยอ่านฟิลด์ตามประเภท
-
-// อ่านฟิลด์ที่เป็น String
 static string? ReadStringField(AnalyzedDocument doc, string fieldName)
 {
-    if (doc.Fields.TryGetValue(fieldName, out var field) &&
-        field.FieldType == DocumentFieldType.String)
-    {
+    if (doc.Fields.TryGetValue(fieldName, out var field) && field.FieldType == DocumentFieldType.String)
         return field.Value.AsString();
-    }
     return null;
 }
 
-// อ่านฟิลด์ที่เป็น Currency (หรือ Number) -> คืนค่าเป็น string ที่มีสัญลักษณ์และจำนวน
 static string? ReadCurrencyField(AnalyzedDocument doc, string fieldName)
 {
     if (doc.Fields.TryGetValue(fieldName, out var field))
     {
-        if (field.FieldType == DocumentFieldType.Currency)
+        switch (field.FieldType)
         {
-            var currencyVal = field.Value.AsCurrency();
-            return $"{currencyVal.Symbol}{currencyVal.Amount}";
+            case DocumentFieldType.Currency:
+                var currencyVal = field.Value.AsCurrency();
+                return $"{currencyVal.Symbol}{currencyVal.Amount}";
+            case DocumentFieldType.Double:
+                return field.Value.AsDouble().ToString();
+            case DocumentFieldType.String:
+                return field.Value.AsString();
         }
     }
     return null;
 }
 
-// อ่านฟิลด์ที่เป็น Date -> คืนค่าเป็น string ในรูปแบบ "yyyy-MM-dd"
 static string? ReadDateField(AnalyzedDocument doc, string fieldName)
 {
-    if (doc.Fields.TryGetValue(fieldName, out var field) &&
-        field.FieldType == DocumentFieldType.Date)
-    {
+    if (doc.Fields.TryGetValue(fieldName, out var field) && field.FieldType == DocumentFieldType.Date)
         return field.Value.AsDate().ToString("yyyy-MM-dd");
-    }
     return null;
 }
 
-// -----------------------------------------------------------------------------
-// Request/Response Models
-
-// Model สำหรับรับ JSON Request
 record AnalyzeRequest(string InvoiceUrl);
 
-// Model สำหรับแสดงผลลัพธ์ (JSON Response)
 record InvoiceData(
     string? CustomerAddress,
     string? CustomerId,
@@ -196,9 +219,12 @@ record InvoiceData(
     string? PaymentTerm
 );
 
-// Model สำหรับรายการ Items ใน Invoice
 record InvoiceItem(
+    string? ProductCode,
     string? Description,
+    string? Quantity,
+    double? Unit,
     string? Amount,
-    double? Confidence
+    string? Discount,
+    double? confidence
 );
